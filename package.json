@@ -1,0 +1,22 @@
+{
+  "name": "shinobi-marchand",
+  "version": "1.0.0",
+  "description": "Tracker automatique des positions NPC pour Shinobi.fr",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": ["shinobi", "npc", "tracker"],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "node-fetch": "^2.7.0"
+  }
+}
