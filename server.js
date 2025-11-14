@@ -428,8 +428,36 @@ app.get("/api/mineur-position", async (req, res) => {
   }
 });
 
+// Endpoint de santé pour vérifier la configuration
+app.get("/api/health", (req, res) => {
+  const hasLogin = !!process.env.SHINOBI_LOGIN;
+  const hasPassword = !!process.env.SHINOBI_PASSWORD;
+  
+  return res.json({
+    status: hasLogin && hasPassword ? "ok" : "error",
+    config: {
+      hasLogin,
+      hasPassword,
+      nodeEnv: process.env.NODE_ENV || "not set"
+    },
+    cache: {
+      hasMarchand: !!positionsCache.marchand,
+      hasMineur: !!positionsCache.mineur,
+      lastUpdate: positionsCache.lastUpdate,
+      error: positionsCache.error
+    }
+  });
+});
+
 // Endpoint pour récupérer toutes les positions (depuis le cache)
 app.get("/api/positions", (req, res) => {
+  // Vérifier la configuration d'abord
+  if (!process.env.SHINOBI_LOGIN || !process.env.SHINOBI_PASSWORD) {
+    return res.status(500).json({ 
+      error: "Configuration manquante : Les variables d'environnement SHINOBI_LOGIN et SHINOBI_PASSWORD doivent être définies."
+    });
+  }
+
   if (positionsCache.error && !positionsCache.marchand && !positionsCache.mineur) {
     return res.status(500).json({ 
       error: positionsCache.error || "Erreur lors de la récupération des positions."
