@@ -59,48 +59,68 @@ async function fetchAllPositions(force = false) {
 
   isUpdating = true;
   
+  // Récupérer les positions individuellement pour gérer les erreurs séparément
+  let marchandPosition = null;
+  let mineurPosition = null;
+  let errors = [];
+
+  // Récupérer la position du marchand
   try {
-    const marchandPosition = await getNpcPosition(
+    marchandPosition = await getNpcPosition(
       ARCHIVES_URL_MARCHAND,
       "marchand\\s+ambulant",
       "marchand ambulant"
     );
-    
-    const mineurPosition = await getNpcPosition(
+    console.log("Marchand position récupérée:", marchandPosition);
+  } catch (err) {
+    console.error("Erreur lors de la récupération du marchand:", err.message);
+    errors.push(`Marchand: ${err.message}`);
+    // Garder l'ancienne valeur du cache si disponible
+    if (positionsCache.marchand) {
+      marchandPosition = positionsCache.marchand;
+    }
+  }
+  
+  // Récupérer la position du mineur (peut échouer si "dans les souterrains")
+  try {
+    mineurPosition = await getNpcPosition(
       ARCHIVES_URL_MINEUR,
       "mineur",
       "mineur"
     );
-    
-    positionsCache = {
-      marchand: marchandPosition,
-      mineur: mineurPosition,
-      lastUpdate: new Date(),
-      error: null
-    };
-    
-    if (process.env.NODE_ENV === "development") {
-      console.log("Positions mises à jour:", {
-        marchand: marchandPosition,
-        mineur: mineurPosition,
-        lastUpdate: positionsCache.lastUpdate
-      });
-    }
+    console.log("Mineur position récupérée:", mineurPosition);
   } catch (err) {
-    // Ne pas écraser un cache valide en cas d'erreur
-    if (!isCacheValid()) {
-      positionsCache.error = err.message;
+    console.error("Erreur lors de la récupération du mineur:", err.message);
+    errors.push(`Mineur: ${err.message}`);
+    // Si le mineur est "dans les souterrains", c'est normal, ne pas considérer comme erreur critique
+    if (err.message.includes("souterrains") || err.message.includes("introuvable")) {
+      mineurPosition = "Dans les souterrains (introuvable pour le moment)";
+    } else {
+      // Garder l'ancienne valeur du cache si disponible
+      if (positionsCache.mineur) {
+        mineurPosition = positionsCache.mineur;
+      }
     }
-    // Toujours logger les erreurs en production pour le diagnostic
-    console.error("Erreur lors de la mise à jour des positions:", {
-      message: err.message,
-      stack: err.stack,
-      hasLogin: !!process.env.SHINOBI_LOGIN,
-      hasPassword: !!process.env.SHINOBI_PASSWORD
-    });
-  } finally {
-    isUpdating = false;
   }
+  
+  // Mettre à jour le cache même si une seule position a été récupérée
+  positionsCache = {
+    marchand: marchandPosition || positionsCache.marchand,
+    mineur: mineurPosition || positionsCache.mineur,
+    lastUpdate: new Date(),
+    error: errors.length > 0 ? errors.join(" | ") : null
+  };
+  
+  if (process.env.NODE_ENV === "development") {
+    console.log("Positions mises à jour:", {
+      marchand: positionsCache.marchand,
+      mineur: positionsCache.mineur,
+      lastUpdate: positionsCache.lastUpdate,
+      errors: errors.length > 0 ? errors : "aucune"
+    });
+  }
+  
+  isUpdating = false;
 }
 
 // Fonction pour calculer le temps jusqu'à la prochaine heure (heure européenne)
@@ -339,42 +359,75 @@ function extractPosition($, npcName) {
 async function getNpcPosition(archivesUrl, npcName, npcDisplayName) {
   const cookieHeader = await login();
 
-  // Page archives
-  const archivesResponse = await fetch(archivesUrl, {
-    method: "GET",
-    headers: {
-      Cookie: cookieHeader,
-      "User-Agent": "Mozilla/5.0",
-    },
-  });
+  // Timeout de 15 secondes pour le chargement des archives
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
 
-  if (!archivesResponse.ok) {
-    throw new Error("Impossible de charger la page des archives.");
-  }
+  try {
+    // Page archives
+    const archivesResponse = await fetch(archivesUrl, {
+      method: "GET",
+      headers: {
+        Cookie: cookieHeader,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "fr-FR,fr;q=0.9",
+        "Referer": "https://www.shinobi.fr/",
+      },
+      signal: controller.signal,
+    });
 
-  const html = await archivesResponse.text();
-  const $ = cheerio.load(html);
+    clearTimeout(timeoutId);
 
-  const position = extractPosition($, npcName);
-
-  // Si toujours rien, on vérifie si c'est une erreur "pas aux archives"
-  if (!position) {
-    const fullText = $("body").text().replace(/\s+/g, " ").trim();
-
-    // Détection de différents messages d'erreur possibles
-    const isNotAtArchives = 
-      (/archives/i.test(fullText) && (/dois être|devez être|être présent|être aux/i.test(fullText))) ||
-      (/vous devez/i.test(fullText) && /archives/i.test(fullText)) ||
-      (/accès refusé/i.test(fullText) && /archives/i.test(fullText));
-
-    if (isNotAtArchives) {
-      throw new Error(`Le joueur n'est pas aux archives, impossible de récupérer la position du ${npcDisplayName}.`);
+    if (!archivesResponse.ok) {
+      const statusText = archivesResponse.statusText || `Status ${archivesResponse.status}`;
+      throw new Error(`Impossible de charger la page des archives. ${statusText} (${archivesResponse.status})`);
     }
 
-    throw new Error(`Position du ${npcDisplayName} introuvable dans la page. (Le joueur n'est peut-être pas aux archives ou le HTML a changé.)`);
-  }
+    const html = await archivesResponse.text();
+    
+    if (!html || html.length < 100) {
+      throw new Error("La page des archives est vide ou invalide.");
+    }
 
-  return position;
+    const $ = cheerio.load(html);
+
+    const position = extractPosition($, npcName);
+
+    // Si toujours rien, vérifier les cas spéciaux
+    if (!position) {
+      const fullText = $("body").text().replace(/\s+/g, " ").trim();
+
+      // Cas spécial : Mineur dans les souterrains (c'est normal, pas une erreur)
+      if (npcName === "mineur" && (/souterrains/i.test(fullText) && /introuvable/i.test(fullText))) {
+        throw new Error("Mineur dans les souterrains (introuvable pour le moment)");
+      }
+
+      // Détection de différents messages d'erreur possibles
+      const isNotAtArchives = 
+        (/archives/i.test(fullText) && (/dois être|devez être|être présent|être aux/i.test(fullText))) ||
+        (/vous devez/i.test(fullText) && /archives/i.test(fullText)) ||
+        (/accès refusé/i.test(fullText) && /archives/i.test(fullText));
+
+      if (isNotAtArchives) {
+        throw new Error(`Le joueur n'est pas aux archives, impossible de récupérer la position du ${npcDisplayName}.`);
+      }
+
+      throw new Error(`Position du ${npcDisplayName} introuvable dans la page. (Le joueur n'est peut-être pas aux archives ou le HTML a changé.)`);
+    }
+
+    return position;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error("Timeout lors du chargement de la page des archives (plus de 15 secondes).");
+    }
+    // Re-throw avec plus de détails si c'est déjà notre erreur
+    if (err.message.includes("Impossible de charger") || err.message.includes("Timeout")) {
+      throw err;
+    }
+    throw new Error(`Erreur lors du chargement des archives: ${err.message}`);
+  }
 }
 
 app.get("/api/marchand-position", async (req, res) => {
