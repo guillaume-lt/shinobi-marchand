@@ -91,9 +91,13 @@ async function fetchAllPositions(force = false) {
     if (!isCacheValid()) {
       positionsCache.error = err.message;
     }
-    if (process.env.NODE_ENV === "development") {
-      console.error("Erreur lors de la mise à jour des positions:", err.message);
-    }
+    // Toujours logger les erreurs en production pour le diagnostic
+    console.error("Erreur lors de la mise à jour des positions:", {
+      message: err.message,
+      stack: err.stack,
+      hasLogin: !!process.env.SHINOBI_LOGIN,
+      hasPassword: !!process.env.SHINOBI_PASSWORD
+    });
   } finally {
     isUpdating = false;
   }
@@ -141,7 +145,13 @@ function scheduleNextHourlyUpdate() {
 }
 
 // Récupérer les positions au démarrage (force = true pour la première fois)
-fetchAllPositions(true);
+// Attendre un peu pour s'assurer que tout est initialisé
+setTimeout(() => {
+  console.log("Démarrage de la récupération initiale des positions...");
+  fetchAllPositions(true).catch(err => {
+    console.error("Erreur au démarrage:", err.message);
+  });
+}, 2000);
 
 // Programmer la première mise à jour à l'heure pile, puis toutes les heures
 scheduleNextHourlyUpdate();
@@ -155,28 +165,43 @@ async function login() {
     throw new Error("Identifiants non configurés. Vérifiez les variables d'environnement SHINOBI_LOGIN et SHINOBI_PASSWORD.");
   }
 
-  const loginResponse = await fetch(LOGIN_URL, {
-    method: "POST",
-    redirect: "manual",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": "Mozilla/5.0",
-    },
-    body: new URLSearchParams({
-      login: login,
-      pass: password,
-      connecter: "Connexion",
-    }),
-  });
+  // Timeout de 10 secondes pour la connexion
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-  const setCookie = loginResponse.headers.raw()["set-cookie"];
-  if (!setCookie || setCookie.length === 0) {
-    throw new Error("Impossible de se connecter (cookies non reçus).");
+  try {
+    const loginResponse = await fetch(LOGIN_URL, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      },
+      body: new URLSearchParams({
+        login: login,
+        pass: password,
+        connecter: "Connexion",
+      }),
+      signal: controller.signal,
+    });
+    
+    clearTimeout(timeoutId);
+
+    const setCookie = loginResponse.headers.raw()["set-cookie"];
+    if (!setCookie || setCookie.length === 0) {
+      throw new Error("Impossible de se connecter (cookies non reçus). Vérifiez vos identifiants.");
+    }
+
+    return setCookie
+      .map((c) => c.split(";")[0])
+      .join("; ");
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error("Timeout lors de la connexion à shinobi.fr (plus de 10 secondes).");
+    }
+    throw err;
   }
-
-  return setCookie
-    .map((c) => c.split(";")[0])
-    .join("; ");
 }
 
 // Fonction helper pour extraire la position d'un NPC
@@ -432,19 +457,25 @@ app.get("/api/mineur-position", async (req, res) => {
 app.get("/api/health", (req, res) => {
   const hasLogin = !!process.env.SHINOBI_LOGIN;
   const hasPassword = !!process.env.SHINOBI_PASSWORD;
+  const loginValue = process.env.SHINOBI_LOGIN ? `${process.env.SHINOBI_LOGIN.substring(0, 2)}...` : "not set";
+  const passwordValue = process.env.SHINOBI_PASSWORD ? "***" : "not set";
   
   return res.json({
     status: hasLogin && hasPassword ? "ok" : "error",
     config: {
       hasLogin,
       hasPassword,
-      nodeEnv: process.env.NODE_ENV || "not set"
+      loginPreview: loginValue,
+      passwordSet: !!process.env.SHINOBI_PASSWORD,
+      nodeEnv: process.env.NODE_ENV || "not set",
+      nodeVersion: process.version
     },
     cache: {
       hasMarchand: !!positionsCache.marchand,
       hasMineur: !!positionsCache.mineur,
       lastUpdate: positionsCache.lastUpdate,
-      error: positionsCache.error
+      error: positionsCache.error,
+      isUpdating: isUpdating
     }
   });
 });
